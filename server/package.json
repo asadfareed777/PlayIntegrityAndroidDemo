@@ -1,0 +1,20 @@
+{
+  "name": "play-integrity-server",
+  "version": "1.0.0",
+  "description": "Backend that verifies Play Integrity Standard API tokens and releases sensitive configuration.",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test test/",
+    "mock-token": "node scripts/mock-token.js"
+  },
+  "dependencies": {
+    "express": "4.21.2",
+    "google-auth-library": "9.15.1"
+  }
+}
