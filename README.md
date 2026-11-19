@@ -10,20 +10,26 @@ The app asks Google for an integrity token and sends it to the server. The serve
       └──── config, or 403 "blocked" ◀┘
 ```
 
+> [!WARNING]
+> **Daily quota: 10,000 integrity checks per day by default.** When the quota runs out, Google stops verifying tokens, the server returns `503`, and **every user is blocked** until the quota resets. Request a higher quota in Play Console **before launch**, and remember that testing on production uses the same quota as real users. Details: [9. Quota and side effects](#9-quota-and-side-effects).
+
 ---
 
 ## Contents
 
-1. [Quick start (no accounts needed)](#1-quick-start-no-accounts-needed)
-2. [What's in the project](#2-whats-in-the-project)
-3. [Google Cloud setup](#3-google-cloud-setup)
-4. [Play Console setup](#4-play-console-setup)
-5. [Server setup](#5-server-setup)
-6. [App setup](#6-app-setup)
-7. [How it works: diagram, step-by-step flow, config storage and reuse](#7-how-it-works)
-8. [Testing](#8-testing)
-9. [Before going to production](#9-before-going-to-production)
-10. [Troubleshooting](#10-troubleshooting)
+| # | Section | Who needs it |
+|---|---|---|
+| 1 | [Quick start (no accounts needed)](#1-quick-start-no-accounts-needed) | Everyone |
+| 2 | [What's in the project](#2-whats-in-the-project) | Everyone |
+| 3 | [Google Cloud setup](#3-google-cloud-setup) | Whoever owns the Google accounts (once) |
+| 4 | [Play Console setup](#4-play-console-setup) | Whoever owns the Google accounts (once) |
+| 5 | [Server setup](#5-server-setup) | Backend |
+| 6 | [App setup](#6-app-setup) | Android |
+| 7 | [How it works: diagram, step-by-step flow, config storage and reuse](#7-how-it-works) | Everyone |
+| 8 | [Testing](#8-testing), including [testing against production](#85-testing-on-a-specific-device-against-the-production-server) | QA, Android, Backend |
+| 9 | [Quota and side effects](#9-quota-and-side-effects) | Everyone, **read before launch** |
+| 10 | [Before going to production](#10-before-going-to-production): separate checklists for Play Console/Cloud, server and app | Release owner |
+| 11 | [Troubleshooting](#11-troubleshooting): app, server and Play Console problems | Everyone |
 
 ---
 
@@ -120,7 +126,8 @@ Needed for the full checks: app recognition, signing certificate, licensing and 
 2. Go to **Test and release → App integrity → Play Integrity API → Link a Cloud project**, and choose the project from step 3.
 3. Go to **App integrity → App signing** and copy the **SHA-256** of the *App signing key certificate*. The server needs it.
 4. Upload a build to **Internal testing** and add your team as testers. Only Play-installed builds get `PLAY_RECOGNIZED`.
-5. Optional: **Play Integrity API → Testing responses** lets a tester account get any verdict you choose, such as "rooted device" or "modified app". This is the easiest way to test the block screens on a real phone.
+5. Optional: **Play Integrity API → Testing responses** lets a tester account get any verdict you choose, such as "rooted device" or "modified app". This is the easiest way to test the block screens on a real phone, even against production. See [8.5](#85-testing-on-a-specific-device-against-the-production-server).
+6. **Request a higher quota before launch** if you may need more than 10,000 checks/day. See [9.1](#91-the-10000day-quota).
 
 ---
 
@@ -156,7 +163,7 @@ The server reads `server/.env` on startup. Real environment variables override i
 | `MAX_TOKEN_AGE_MS` | `120000` | How old a token may be (2 min) |
 | `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_MS` | `20` / `60000` | Requests per IP per minute |
 | `SENSITIVE_CONFIG_JSON` | demo values | The config sent to trusted apps |
-| `CONFIG_TTL_SECONDS` / `CONFIG_CACHEABLE` | `3600` / `true` | How long the app may cache it |
+| `CONFIG_TTL_SECONDS` / `CONFIG_CACHEABLE` | `3600` / `true` | How long the app may cache it. A shorter TTL uses more of the daily quota. |
 | `TRUST_PROXY` | `false` | Set `true` behind a load balancer |
 
 Docker:
@@ -174,9 +181,13 @@ docker build -t play-integrity-server server
 Edit `gradle.properties`:
 
 ```properties
-PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER=123456789012   # from section 3, step 3
-INTEGRITY_BACKEND_URL=http://10.0.2.2:8080/        # see "Connect to the server" below
+# From section 3, step 3
+PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER=123456789012
+# See "Connect to the server" below
+INTEGRITY_BACKEND_URL=http://10.0.2.2:8080/
 ```
+
+> Put comments on their own line. In `.properties` files, a `#` after a value is **not** a comment. It becomes part of the value and breaks the build.
 
 ### Build
 
@@ -337,7 +348,7 @@ Launch after that ──────▶ no cache ──▶ token ──▶ serve
 ```
 
 Things to know:
-- **While the cache is valid, the device isn't checked again.** The TTL is a trade-off. A shorter TTL means more frequent checks but more server and Google calls (quota is 10k/day by default). A longer TTL means fewer calls but slower reaction to a device going bad.
+- **While the cache is valid, the device isn't checked again.** The TTL is a trade-off. A shorter TTL means more frequent checks but more server and Google calls, which count against the **10k/day quota** ([9.1](#91-the-10000day-quota)). A longer TTL means fewer calls but slower reaction to a device going bad.
 - **A 403 never falls back to the cache.** Blocking deletes the cache too, so an old "good" copy can't be used after a bad verdict.
 - The provider is prepared (step 1) even when the cache is used, as the diagram shows. So a phone without working Play services is blocked even if it has a cached copy.
 - Expiry uses the **phone's clock** against the server's `issuedAt`. If the phone clock is set far back, the cache lives longer. To stop that, keep the TTL short or have the server check a fresh token for very sensitive actions.
@@ -378,6 +389,12 @@ If you change this format, change **both** `RequestHasher.kt` and `server/src/in
 
 ## 8. Testing
 
+- [8.1 What you can test with which accounts](#81-what-you-can-test-with-which-accounts)
+- [8.2 Automated tests](#82-automated-tests)
+- [8.3 Mock scenarios](#83-mock-scenarios) (local server)
+- [8.4 Manual checklist](#84-manual-checklist-real-phone--local-or-staging-server) (real phone + local or staging server)
+- [8.5 Testing on a specific device against the production server](#85-testing-on-a-specific-device-against-the-production-server)
+
 ### 8.1 What you can test with which accounts
 
 | You have | What you can test |
@@ -388,10 +405,12 @@ If you change this format, change **both** `RequestHasher.kt` and `server/src/in
 
 ### 8.2 Automated tests
 
-| Command | Covers |
-|---|---|
-| `cd server && npm test` | Every server check: 22 endpoint tests + 8 unit tests |
-| `./gradlew testDebugUnitTest` | Every app branch: cache, offline, retry, provider re-prepare, 400/403/429, wipe on block, hash format |
+| Side | Command | Covers |
+|---|---|---|
+| Server | `cd server && npm test` | Every server check: 22 endpoint tests + 8 unit tests |
+| App | `./gradlew testDebugUnitTest` | Every app branch: cache, offline, retry, provider re-prepare, 400/403/429, wipe on block, hash format |
+
+Neither needs accounts, a device or a network, and neither uses any quota.
 
 ### 8.3 Mock scenarios
 
@@ -414,56 +433,213 @@ Use with `node scripts/mock-token.js <scenario>` while the server runs in mock m
 
 Sending the same `pass` request body twice returns `403 REPLAYED_REQUEST` the second time.
 
-### 8.4 Manual checklist (real phone + real server)
+### 8.4 Manual checklist (real phone + local or staging server)
 
-| # | Do this | Expect |
+Use a server **you control**: your own machine or a staging server running in `google` mode. The **Change made on** column shows where each step changes something. Steps marked **Server** must never be done on production.
+
+| # | Do this | Change made on | Expect |
+|---|---|---|---|
+| 1 | Fresh install from Play internal testing, launch | App | ENABLED (from network) |
+| 2 | Close and reopen the app | App | ENABLED (from cache, no server call) |
+| 3 | Clear → turn on airplane mode → Retry | Phone | "No internet" |
+| 4 | Turn airplane mode off | Phone | Reloads by itself → ENABLED |
+| 5 | Stop the server → Force refresh | **Server** | "Temporary error" |
+| 6 | Set `RATE_LIMIT_MAX=1`, tap Force refresh twice | **Server** | "Temporary error (429)" |
+| 7 | Install a debug APK with `adb install` | App | BLOCKED: `APP_NOT_RECOGNIZED` |
+| 8 | Testing response "no device integrity" | Play Console | BLOCKED: `DEVICE_UNTRUSTED` |
+| 9 | After #1, switch to the bad testing response → Force refresh → reopen app | Play Console | Still BLOCKED (cache was deleted) |
+| 10 | Wrong project number in `gradle.properties` | App (rebuild) | Integrity error: invalid Cloud project number |
+| 11 | Rename `service-account.json` on the server | **Server** | "Temporary error (503)" |
+| 12 | `adb logcat -s SecureConfigNative` after #1 | Phone | Shows keys only, never values |
+
+### 8.5 Testing on a specific device against the production server
+
+Use this when production is the only server and you need to see how one device behaves with different verdicts.
+
+**The tool: Play Console "Testing responses".** It makes Google return a verdict **you choose**, for **Google accounts you choose**. The tokens are still real and signed by Google, so:
+
+- the production server checks them exactly as it checks real users' tokens, with no code or setting changes
+- only the tester accounts get the chosen verdicts; real users are not affected
+- you don't need mock mode (production refuses to start with it anyway)
+
+#### Before you start (once)
+
+| Where | Do this |
+|---|---|
+| Play Console | Open your app's Play Integrity API page (*Test and release → App integrity → Play Integrity API*; Google moves these menus sometimes) and find **Testing responses**. Add the tester's Google account, directly or through a Google Group. |
+| Phone | Sign in to the Play Store with **that tester account**. Keeping it as the only or main account avoids mix-ups. |
+| Phone | Install the app from the **Internal testing** track. That build is Play-signed and already points to the production URL, which is built into the app. |
+| Team | Tell whoever watches production: tester account, device and time window. Your tests will create `DEVICE_UNTRUSTED` / `APP_NOT_RECOGNIZED` log entries and may trigger alerts. |
+
+#### Running one scenario
+
+1. In Play Console, choose the verdict for the tester account.
+2. Wait a few minutes for it to take effect. If nothing changes, force-stop the Play Store and the app.
+3. In the app, tap **Clear**, then **Force refresh**.
+   > Don't skip this. The app caches config for 1 hour (`CONFIG_TTL_SECONDS`). Without Clear, you'd see the old cached result and the server wouldn't be called at all.
+4. Check the result on screen. Ask for the matching server log line (by time or `requestId`).
+5. When you're finished, **remove the override** in Play Console. Otherwise that account keeps getting the fake verdict for this app.
+
+#### Safe to test on production
+
+| Scenario | How | Expected in app |
 |---|---|---|
-| 1 | Fresh install from Play, launch | ENABLED (from network) |
-| 2 | Close and reopen the app | ENABLED (from cache, no server call) |
-| 3 | Clear → turn on airplane mode → Retry | "No internet" |
-| 4 | Turn airplane mode off | Reloads by itself → ENABLED |
-| 5 | Stop the server → Force refresh | "Temporary error" |
-| 6 | Set `RATE_LIMIT_MAX=1`, tap Force refresh twice | "Temporary error (429)" |
-| 7 | Install a debug APK with `adb install` | BLOCKED: `APP_NOT_RECOGNIZED` |
-| 8 | Testing response "no device integrity" | BLOCKED: `DEVICE_UNTRUSTED` |
-| 9 | After #1, switch to the bad testing response → Force refresh → reopen app | Still BLOCKED (cache was deleted) |
-| 10 | Wrong project number in `gradle.properties` | Integrity error: invalid Cloud project number |
-| 11 | Rename `service-account.json` on the server | "Temporary error (503)" |
-| 12 | `adb logcat -s SecureConfigNative` after #1 | Shows keys only, never values |
+| Everything genuine | No override | ENABLED, then from cache on the next launch |
+| Modified / unknown app | App verdict = `UNRECOGNIZED_VERSION` or `UNEVALUATED` | BLOCKED: `APP_NOT_RECOGNIZED` |
+| Rooted / unlocked device | Device labels = only `MEETS_BASIC_INTEGRITY` | BLOCKED: `DEVICE_UNTRUSTED` |
+| Emulator / hooked device | Device labels = none | BLOCKED: `DEVICE_UNTRUSTED` |
+| Strong-integrity device | Add `MEETS_STRONG_INTEGRITY` | ENABLED |
+| Unlicensed user | Licensing = `UNLICENSED` | BLOCKED: `NOT_LICENSED` if production has `REQUIRE_LICENSING=true`, otherwise ENABLED |
+| Good → bad switch | Pass first, switch to a bad verdict, Force refresh, reopen | BLOCKED, and the old cache is gone |
+| Offline | Airplane mode, then Clear + Retry | "No internet", then reloads by itself once online |
+| Offline with cache | Load once, airplane mode, reopen | ENABLED from cache |
+| Play services problems | Disable Play Store updates on the test phone | Initialization / integrity error |
+| Real rooted device | Use an actually rooted phone | BLOCKED: `DEVICE_UNTRUSTED` |
+
+#### Not on production: use a staging server or the mock tests instead
+
+| Scenario | Why not on production | Test it with |
+|---|---|---|
+| `REQUEST_MISMATCH`, `REPLAYED_REQUEST` | Needs an intercepting proxy. Release builds don't trust proxy certificates, and debug builds are rejected at the app check first. | Staging, or mock (`wrong-hash`, send `pass` twice) |
+| `TOKEN_EXPIRED`, `INVALID_TOKEN`, `PACKAGE_MISMATCH` | Needs forged or altered tokens | Mock (`expired`, `google-invalid`, `wrong-package`) |
+| `CERTIFICATE_MISMATCH` | A re-signed APK fails the app check first, so it never reaches the certificate check | Mock (`bad-cert`) |
+| `429` rate limit | You'd have to flood production | Staging with `RATE_LIMIT_MAX=1` |
+| `503` Google down | You can't make Google go down, and breaking production credentials blocks real users | Mock (`google-down`) or staging |
+
+**Never change production settings to make testing easier.** Mock mode, allowing `UNEVALUATED` and an empty certificate list are all refused at startup when `NODE_ENV=production`, and that's on purpose.
+
+Before you start, read the side effects in [9.2](#92-side-effects-of-testing-on-production).
+
+> **Best setup:** a small **staging server** with the same code in `google` mode, dummy values in `SENSITIVE_CONFIG_JSON` and a low rate limit. Point an internal-testing build at it, and you can test every scenario on real devices without touching production.
 
 ---
 
-## 9. Before going to production
+## 9. Quota and side effects
+
+### 9.1 The 10,000/day quota
+
+> [!WARNING]
+> By default, Play Integrity allows about **10,000 integrity checks per app per day**. It's shared by **all users, all testers and all environments** that use the same app and Cloud project.
+
+**What happens when it runs out**
+
+| Where | What happens |
+|---|---|
+| Google | Stops verifying tokens until the quota resets |
+| Server | The decode call fails → returns `503 INTEGRITY_UNAVAILABLE` |
+| App | "Temporary error" → **sensitive features BLOCKED for every user who needs fresh config**. Only users with a still-valid cache keep working. |
+
+**What uses it**
+- One check each time the app needs fresh config: first launch, after the cache expires, **Force refresh**, and after **Clear**.
+- With the default 1-hour TTL, one very active user can use up to about 24 checks a day.
+- Rough estimate: *daily active users × fresh-config launches per user per day*. For example, 2,000 users × 5 = 10,000 = the whole quota.
+- Testing, scripts and load tests in `google` mode use the **same** quota.
+
+**What to do**
+- **Before launch:** request a higher quota on the Play Integrity API page in Play Console. Approval can take days, so don't leave it to launch week.
+- Watch usage: API metrics in Google Cloud Console, plus the server's log/metrics count of `OK` and `DECODE_UNAVAILABLE`. Alert at about **70%**.
+- Lower usage by raising `CONFIG_TTL_SECONDS`, but devices are then re-checked less often (see [7.4](#74-how-the-config-is-reused)).
+- Never run load tests or scripted loops against `google` mode. Use mock mode instead.
+
+### 9.2 Side effects of testing on production
+
+| Side effect | Why it matters | What to do |
+|---|---|---|
+| **Uses real quota** | Every Force refresh / Clear uses one check from the shared 10k/day | Manual tests are fine. No scripts or loops. |
+| **Real config on test phones** | A passing test sends **real production values** to the device | Tap **Clear** after testing on shared phones |
+| **Noise in logs, alerts and dashboards** | Test failures look like attacks or broken devices | Tell the production owner first. Filter by tester account and time window. |
+| **Shared rate limit** | The limit is per IP (20/min). Testers behind one office IP share it, and real users behind that IP do too. | Test slowly. Don't tap Force refresh repeatedly. |
+| **Override stays on** | The tester account keeps getting the fake verdict | Remove it in Play Console when done |
+| **Cache hides changes** | A changed verdict isn't seen until the cache expires | Always **Clear → Force refresh** |
+
+### 9.3 Side effects built into the design
+
+| Behaviour | Effect | Setting |
+|---|---|---|
+| Fail closed | If Google is unavailable, users without a valid cache are blocked | Decide per feature (see 10.2) |
+| Cache TTL | A device that turns bad stays ENABLED until its cache expires | `CONFIG_TTL_SECONDS` |
+| Phone clock | Expiry uses the phone's clock, so a clock set back keeps the cache longer | Keep the TTL short for very sensitive data |
+
+---
+
+## 10. Before going to production
+
+Each checklist belongs to one owner. All three must be done before launch.
+
+### 10.1 Play Console and Google Cloud
 
 **Must do**
-- [ ] Set `NODE_ENV=production`. The server then refuses mock mode, an empty certificate list and relaxed app verdicts.
-- [ ] Set `ALLOWED_CERT_DIGESTS` to the Play **App signing** SHA-256.
-- [ ] Serve over **HTTPS** and use an `https://` URL in release builds.
-- [ ] Keep the service-account key and `SENSITIVE_CONFIG_JSON` in a secret manager, not in `.env`. Rotate the key regularly.
-- [ ] If you run more than one server instance, move replay protection and rate limiting to **Redis**. They are in memory today.
-- [ ] Request a higher Play Integrity quota if you expect more than **10,000 requests/day**.
+- [ ] The app's package name is your own, not `com.example.playintegrity`, and it matches the server's `EXPECTED_PACKAGE_NAME`.
+- [ ] The Cloud project is **linked** to the app in Play Console, and the **Play Integrity API is enabled** in it.
+- [ ] A **higher quota has been requested** if you may exceed **10,000 checks/day** (see [9.1](#91-the-10000day-quota)).
+- [ ] The server uses a **dedicated service account**. Prefer workload identity over a JSON key file; if you use a key, rotate it regularly.
+- [ ] **Testing responses** overrides are removed from accounts that no longer need them.
 
 **Should do**
-- [ ] Alerts for spikes in `REQUEST_MISMATCH`, `REPLAYED_REQUEST` or `DEVICE_UNTRUSTED`, for Google errors, and for quota use.
-- [ ] Decide what happens when Google is down. Today the server blocks (fails closed).
-- [ ] Certificate pinning in the app (OkHttp `CertificatePinner`).
+- [ ] Decide on the optional extra verdicts (Play Protect status, risky apps running, recent device activity) and turn on only the ones the server will check.
+
+### 10.2 Server
+
+**Must do**
+- [ ] `NODE_ENV=production`. The server then refuses mock mode, an empty certificate list and relaxed app verdicts.
+- [ ] `ALLOWED_CERT_DIGESTS` = the Play **App signing** SHA-256.
+- [ ] Served over **HTTPS** only. Set `TRUST_PROXY=true` behind a load balancer.
+- [ ] The service-account key and `SENSITIVE_CONFIG_JSON` are in a **secret manager**, not in `.env`.
+- [ ] If you run more than one instance, replay protection and rate limiting are moved to **Redis**. They are in memory today.
+- [ ] Alerts on **quota use (about 70%)**, Google decode errors (`DECODE_UNAVAILABLE`), and spikes in `REQUEST_MISMATCH`, `REPLAYED_REQUEST` or `DEVICE_UNTRUSTED`.
+
+**Should do**
+- [ ] Decide per feature what happens when Google is down. Today the server blocks (fails closed).
+- [ ] Choose `REQUIRED_DEVICE_VERDICT`, `REQUIRE_LICENSING` and `CONFIG_TTL_SECONDS` on purpose (TTL ↔ quota trade-off).
 - [ ] Send only the values the app really needs. Prefer short-lived tokens over permanent API keys.
-- [ ] Consider Play's remediation dialogs, which let users fix the problem instead of hitting a hard block.
-- [ ] Optional extra verdicts in Play Console: Play Protect status, risky apps running, recent device activity.
+- [ ] Have a **staging server** for testing (see [8.5](#85-testing-on-a-specific-device-against-the-production-server)).
+
+### 10.3 App
+
+**Must do**
+- [ ] `applicationId` in `app/build.gradle.kts` = your real package name.
+- [ ] `PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER` = the real project number.
+- [ ] `INTEGRITY_BACKEND_URL` = the production **`https://`** URL for release builds.
+- [ ] `res/xml/network_security_config.xml`: remove the plain-HTTP exceptions for `10.0.2.2` / `localhost` from release builds.
+- [ ] Release build uploaded through Play (internal testing first), so users get `PLAY_RECOGNIZED`.
+
+**Should do**
+- [ ] Certificate pinning for the backend host (OkHttp `CertificatePinner`, with a backup pin).
+- [ ] Play's remediation dialogs, so users can fix a problem (for example, update Play services) instead of hitting a hard block.
+- [ ] Clear messages for each BLOCKED reason in the UI.
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
+
+### App (Android Studio / device)
 
 | Problem | Fix |
 |---|---|
 | Gradle: *SDK location not found* | Create `local.properties` with `sdk.dir=C\:/Users/<you>/AppData/Local/Android/Sdk` (or let Android Studio create it) |
 | Gradle fails with a JDK error | Use Android Studio's bundled JDK (Settings → Build Tools → Gradle → Gradle JDK) |
-| App: *Play services / initialization error* | The emulator image needs **Google Play**, and the project number must be set |
-| App: *CLOUD_PROJECT_NUMBER_IS_INVALID* | Use the project **number**, not the ID, and check the API is enabled |
-| App: *Could not reach server* | Emulator → `10.0.2.2`. Phone → run `adb reverse tcp:8080 tcp:8080` and use `localhost` |
-| App: *Cleartext HTTP not permitted* | Only `10.0.2.2` and `localhost` may use HTTP |
-| Server always returns `503` | Wrong or missing `service-account.json`, or the API is not enabled in that project |
-| Server returns `APP_NOT_RECOGNIZED` | The build wasn't installed from Play. Use internal testing, or allow `UNEVALUATED` for local tests. |
-| Server returns `INVALID_TOKEN` | The token is for a different package or Cloud project than the server expects |
-| Server won't start: *Invalid configuration* | Read the message. It lists exactly which setting is missing or unsafe. |
+| Build error about `CLOUD_PROJECT_NUMBER` | `gradle.properties` values must be plain. Put `#` comments on their own line, not after a value. |
+| *Play services / initialization error* | The emulator image needs **Google Play**, and the project number must be set |
+| *CLOUD_PROJECT_NUMBER_IS_INVALID* | Use the project **number**, not the ID, and check the API is enabled |
+| *Could not reach server* | Emulator → `10.0.2.2`. Phone → run `adb reverse tcp:8080 tcp:8080` and use `localhost` |
+| *Cleartext HTTP not permitted* | Only `10.0.2.2` and `localhost` may use HTTP |
+| Changed something but the result didn't change | The result came from the cache. Tap **Clear → Force refresh**. |
+
+### Server
+
+| Problem | Fix |
+|---|---|
+| Won't start: *Invalid configuration* | Read the message. It lists exactly which setting is missing or unsafe. |
+| Always returns `503` | Wrong or missing `service-account.json`, the API isn't enabled in that project, or the **daily quota is used up** |
+| Returns `APP_NOT_RECOGNIZED` | The build wasn't installed from Play. Use internal testing, or allow `UNEVALUATED` for local tests (not production). |
+| Returns `INVALID_TOKEN` | The token is for a different package or Cloud project than the server expects |
+| Returns `CERTIFICATE_MISMATCH` for a Play build | `ALLOWED_CERT_DIGESTS` has the upload key instead of the **App signing** key |
+| Returns `429` | Too many requests from one IP. Wait a minute, or check `TRUST_PROXY` behind a load balancer. |
+
+### Play Console
+
+| Problem | Fix |
+|---|---|
+| Testing response has no effect | Wait a few minutes. Check that the tester account is the one signed in to the Play Store. Force-stop the Play Store, then **Clear → Force refresh** in the app. |
+| Tester still gets fake verdicts | Remove the account from Testing responses |
+| Can't link the Cloud project | You need admin rights in Play Console and owner/editor rights on the Cloud project |
